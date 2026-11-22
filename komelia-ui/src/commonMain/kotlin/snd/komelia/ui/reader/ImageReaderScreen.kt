@@ -69,8 +69,39 @@ fun readerScreen(
             book = book
         )
 
-        else -> error("Unsupported book format")
+        // CUSTOM FORK: Komga only fills mediaType/mediaProfile after a book has been analyzed.
+        // With on-demand analysis (our deployment) most books stay UNKNOWN, so upstream's
+        // error("Unsupported book format") made every un-analyzed book unreadable. Fall back to
+        // the archive extension; opening the reader makes Komga analyze the book on demand.
+        book.isImageArchive() -> {
+            ImageReaderScreen(
+                bookId = book.id,
+                markReadProgress = markReadProgress,
+                bookSiblingsContext = context
+            )
+        }
+
+        else -> error("Unsupported book format: ${book.name} (mediaProfile=${mediaProfile})")
     }
+}
+
+private val IMAGE_ARCHIVE_EXTENSIONS = setOf("cbz", "cbr", "cb7", "zip", "rar", "7z")
+
+/**
+ * CUSTOM FORK: does this book look like a page archive?
+ *
+ * Prefers the file url (Komga always has it, and our books carry no extension in `name`),
+ * then the display name. Query strings and surrounding blanks are tolerated.
+ */
+private fun KomeliaBook.isImageArchive(): Boolean {
+    val source = sequenceOf(url, name).firstOrNull { it.isNotBlank() } ?: return false
+    val extension = source
+        .substringBefore('?')
+        .substringBefore('#')
+        .trim()
+        .substringAfterLast('.', "")
+        .lowercase()
+    return extension in IMAGE_ARCHIVE_EXTENSIONS
 }
 
 class ImageReaderScreen(
