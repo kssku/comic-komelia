@@ -70,6 +70,65 @@ adb shell pm install -r /data/local/tmp/komelia.apk
 > 坑：小米设备的 `/sdcard` 是 fuse，`pm install /sdcard/xxx.apk` 会被 SELinux 拒
 > （`system_server has no access to read file context u:or:fuse`），必须走 `/data/local/tmp/`。
 
+## 本机构建实测（2026-11-22，redos）
+
+```bash
+# 环境
+JDK 21 / Gradle 9.7.1 / AGP 9.1.1 / Kotlin 2.4.20
+android-compileSdk = 37  →  sdkmanager 里包名是 "platforms;android-37.0"（不是 android-37）
+```
+
+首次构建 **28 分 48 秒**（252 tasks，KMP + Compose）。
+
+### 两个必须知道的坑
+
+**1. 子模块只认三个**：`:third_party:ChipTextField`、`:third_party:compose-sonner`、
+`includeBuild("third_party/secret-service")`。递归拉全部子模块会卡在
+`chromium.googlesource.com`（libwebp）——国内不通，Android 构建也用不到。只初始化这三个：
+
+```bash
+git submodule update --init --depth 1 \
+  third_party/ChipTextField third_party/compose-sonner third_party/secret-service
+# 若工作区是空的（子模块 git 有提交但没检出）：
+git -C third_party/<name> checkout -f HEAD
+```
+
+**2. 光有 Kotlin 编译产物装上去会崩**：
+
+```
+UnsatisfiedLinkError: dlopen failed: library "libsqlitejdbc.so" not found
+  at org.sqlite.core.NativeDB.<clinit>
+  at snd.komelia.db.KomeliaDatabase.<init>
+```
+
+我们自己构建的 APK 只有 2 个 `.so`，官方包有 38 个——`libsqlitejdbc.so`、vips 那套编解码
+（brotli / dav1d / de265 / exif / expat / ffi …）来自 native 子模块的 CMake 构建。
+不编译 native 时，可直接复用**同版本官方 APK** 的 `.so`（源码同版本，ABI 一致）：
+
+```bash
+unzip -q Komelia-0.20.0.apk "lib/*" -d /tmp/native
+for abi in arm64-v8a armeabi-v7a x86_64; do
+  mkdir -p komelia-app/androidApp/src/main/jniLibs/$abi
+  cp /tmp/native/lib/$abi/*.so komelia-app/androidApp/src/main/jniLibs/$abi/
+done
+./gradlew :komelia-app:androidApp:assembleDebug
+```
+
+APK 从 41 MB 变成 125 MB（四个 ABI 全含），装上去就能跑。
+
+> debug 签名与官方发布签名不同，覆盖安装会 `INSTALL_FAILED_UPDATE_INCOMPATIBLE`，
+> 需先 `pm uninstall`（会丢已登录的服务器配置）。
+
+### MIUI 的 USB 安装弹窗
+
+`pm install` 报 `INSTALL_FAILED_USER_RESTRICTED: Install canceled by user` 时，
+是小米「USB 安装提示」弹窗在等确认，只给 7 秒。脚本里这样过：
+
+```bash
+( adb shell pm install -r /data/local/tmp/app.apk > /tmp/inst.log 2>&1 & )
+sleep 3; adb shell input tap <继续安装 的坐标>
+```
+
 ## 已知限制
 
 - `BOOK.FILE_SIZE` 在本栈里曾全为 0（批量入库不 `stat`），书页会显示「0 B」——不影响阅读。
